@@ -7,6 +7,7 @@ Everyone ever followed is kept in follow-log.json and is never followed again.
 Needs GH_USERNAME and GH_TOKEN (classic token with the user:follow scope).
 Set DRY_RUN=true to print what would happen without following anyone.
 """
+import base64
 import datetime as dt
 import json
 import os
@@ -68,43 +69,59 @@ def save_log(log):
         LOG.write_text(json.dumps(log, indent=2) + "\n")
 
 
+SEARCH = """
+query($q: String!, $after: String, $since: DateTime!) {
+  search(query: $q, type: USER, first: 100, after: $after) {
+    nodes {
+      ... on User {
+        login
+        followers { totalCount }
+        following { totalCount }
+        contributionsCollection(from: $since) { contributionCalendar { totalContributions } }
+      }
+    }
+  }
+}"""
+
+
+def graphql(query, **variables):
+    req = urllib.request.Request("https://api.github.com/graphql", method="POST",
+                                 data=json.dumps({"query": query, "variables": variables}).encode(),
+                                 headers={"Authorization": f"Bearer {TOKEN}", "User-Agent": ME})
+    try:
+        with urllib.request.urlopen(req) as r:
+            return json.loads(r.read()).get("data")
+    except urllib.error.HTTPError:
+        return None
+
+
+def looks_good(u):
+    """Under 10 followers, follows at least as many as follow them, and active lately."""
+    followers, following = u["followers"]["totalCount"], u["following"]["totalCount"]
+    active = u["contributionsCollection"]["contributionCalendar"]["totalContributions"]
+    return followers < 10 and following >= max(3, followers) and active > 0
+
+
 def candidates():
-    """Yield search hits from a random slice of active, mid-sized developer accounts."""
-    tried = set()
-    while len(tried) < 12:
+    """Yield small, active developer accounts from random slices of user search."""
+    since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=ACTIVE_DAYS)).isoformat()
+    for _ in range(40):
         lang = random.choice(LANGUAGES)
-        page = random.randint(1, 10)
-        if (lang, page) in tried:
-            continue
-        tried.add((lang, page))
-        q = f"type:user language:{lang} followers:5..500 repos:>=3"
+        offset = random.randrange(0, 1000, 100)
+        sort = random.choice(["joined-desc", "joined-asc", "followers-desc"])
+        q = f"language:{lang} followers:<10 repos:3..100 sort:{sort}"
         if LOCATION:
             q += f' location:"{LOCATION}"'
-        status, res = api("GET", "/search/users", q=q, per_page=100, page=page,
-                          sort=random.choice(["joined", "repositories", "followers"]),
-                          order=random.choice(["asc", "desc"]))
-        if status != 200 or not res:
+        after = base64.b64encode(f"cursor:{offset}".encode()).decode() if offset else None
+        data = graphql(SEARCH, q=q, after=after, since=since)
+        if not data:
             time.sleep(5)
             continue
-        hits = res["items"]
+        hits = [u for u in data["search"]["nodes"] if u and looks_good(u)]
         random.shuffle(hits)
-        print(f"search: {lang}, page {page}: {len(hits)} hits")
+        print(f"search: {lang}, {sort}, from #{offset}: {len(hits)} good")
         yield from hits
-        time.sleep(3)  # search API allows 30 requests a minute
-
-
-def looks_good(login):
-    """Active recently and follows at least as many people as follow them."""
-    _, u = api("GET", f"/users/{login}")
-    if not u or u.get("type") != "User":
-        return False
-    if u["following"] < max(5, u["followers"]):
-        return False
-    _, events = api("GET", f"/users/{login}/events/public", per_page=1)
-    if not events:
-        return False
-    last = dt.datetime.fromisoformat(events[0]["created_at"].replace("Z", "+00:00")).date()
-    return (TODAY - last).days <= ACTIVE_DAYS
+        time.sleep(2)
 
 
 def follow():
@@ -118,8 +135,6 @@ def follow():
         if login.lower() in skip:
             continue
         skip.add(login.lower())
-        if not looks_good(login):
-            continue
         if DRY_RUN:
             print(f"Would follow {login}")
         else:

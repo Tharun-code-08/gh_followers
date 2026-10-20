@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Follow up to 20 random active developers
+      - name: Follow up to 20 random active developers with under 10 followers
         run: python scripts/grow.py follow
 
       - name: Commit follow log
