@@ -1,9 +1,8 @@
-name: Unfollow Non-Followers (1-day delay)
+name: Unfollow Non-Followers (3-day delay)
 
 on:
   schedule:
-    - cron: "0 9 * * *" # daily at 10 AM WAT (9 AM UTC) - 1hr after follow
-    - cron: "0 17 * * *" # daily at 6 PM WAT (5 PM UTC) - 1hr after follow
+    - cron: "0 4 * * *" # daily at 04:00 UTC (09:30 IST), before the follow run
   workflow_dispatch:
     inputs:
       dry_run:
@@ -11,12 +10,13 @@ on:
         required: false
         default: "false"
 
+concurrency: follow-log
+
 env:
   GH_USERNAME: ${{ secrets.GH_USERNAME }}
   GH_TOKEN: ${{ secrets.GH_TOKEN }}
-  WORKER_COUNT: 1
-  QUEUE_SIZE: 5
-  TIME_DELAY_MS: 2000
+  GRACE_DAYS: 3
+  DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
 
 jobs:
   unfollow:
@@ -26,89 +26,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-python@v5
         with:
-          go-version: "1.25"
-          cache: false
+          python-version: "3.12"
 
-      - run: go build -o gh_followers ./cmd
+      - name: Unfollow people from 3+ day old batches who didn't follow back
+        run: python scripts/grow.py unfollow
 
-      - name: Find users to unfollow (followed 1+ days ago, no follow-back)
-        id: find_users
-        run: |
-          [ ! -f follow-log.json ] && echo "No follow-log.json found, skipping." && exit 0
-
-          python3 - <<'EOF'
-          import json, os
-          from datetime import datetime, timezone, timedelta
-
-          with open("follow-log.json") as f:
-              log = json.load(f)
-
-          today = datetime.now(timezone.utc).date()
-          cutoff = today - timedelta(days=1)
-
-          # Collect users from unprocessed batches older than 1 day
-          to_unfollow = []
-          for entry in log:
-              if not entry.get("processed") and \
-                 datetime.strptime(entry["date"], "%Y-%m-%d").date() <= cutoff:
-                  to_unfollow.extend(entry.get("users", []))
-
-          if to_unfollow:
-              # Deduplicate
-              to_unfollow = list(dict.fromkeys(to_unfollow))
-              with open(os.environ["GITHUB_OUTPUT"], "a") as out:
-                  out.write(f"users={','.join(to_unfollow)}\n")
-                  out.write("has_users=true\n")
-              print(f"Found {len(to_unfollow)} users to check: {to_unfollow}")
-          else:
-              with open(os.environ["GITHUB_OUTPUT"], "a") as out:
-                  out.write("has_users=false\n")
-              print("No users eligible for unfollow yet.")
-          EOF
-
-      - name: Unfollow non-followers from 1-day-old batches
-        if: steps.find_users.outputs.has_users == 'true' && github.event.inputs.dry_run != 'true'
-        run: |
-          USERS="${{ steps.find_users.outputs.users }}"
-          # Build --users flag: comma-separated list
-          ./gh_followers unfollow --force --users "$USERS"
-
-      - name: Dry run — show who would be unfollowed
-        if: steps.find_users.outputs.has_users == 'true' && github.event.inputs.dry_run == 'true'
-        run: |
-          USERS="${{ steps.find_users.outputs.users }}"
-          ./gh_followers unfollow --users "$USERS"
-
-      - name: Mark processed batches in log
-        if: steps.find_users.outputs.has_users == 'true' && github.event.inputs.dry_run != 'true'
-        run: |
-          python3 - <<'EOF'
-          import json
-          from datetime import datetime, timezone, timedelta
-
-          with open("follow-log.json") as f:
-              log = json.load(f)
-
-          today = datetime.now(timezone.utc).date()
-          cutoff = today - timedelta(days=1)
-
-          for entry in log:
-              if not entry.get("processed") and \
-                 datetime.strptime(entry["date"], "%Y-%m-%d").date() <= cutoff:
-                  entry["processed"] = True
-
-          with open("follow-log.json", "w") as f:
-              json.dump(log, f, indent=2)
-          print("Marked eligible batches as processed.")
-          EOF
-
-      - name: Commit updated log
-        if: steps.find_users.outputs.has_users == 'true' && github.event.inputs.dry_run != 'true'
+      - name: Commit follow log
         run: |
           git config user.name "${{ secrets.GH_USERNAME }}"
           git config user.email "${{ secrets.GH_EMAIL }}"
           git add follow-log.json
-          git diff --cached --quiet || git commit -m "chore: unfollowed non-followers $(TZ='Africa/Lagos' date '+%Y-%m-%d %H:%M:%S WAT')"
+          git diff --cached --quiet || git commit -m "chore: unfollowed non-followers $(date -u '+%Y-%m-%d')"
           git push

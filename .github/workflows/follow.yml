@@ -2,16 +2,21 @@ name: Daily Follow
 
 on:
   schedule:
-    - cron: "0 8 * * *" # daily at 9 AM WAT (8 AM UTC) - catches Europe morning
-    - cron: "0 16 * * *" # daily at 5 PM WAT (4 PM UTC) - catches US morning
+    - cron: "30 4 * * *" # daily at 04:30 UTC (10:00 IST)
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (list only, no follow)"
+        required: false
+        default: "false"
+
+concurrency: follow-log
 
 env:
   GH_USERNAME: ${{ secrets.GH_USERNAME }}
   GH_TOKEN: ${{ secrets.GH_TOKEN }}
-  WORKER_COUNT: 1
-  QUEUE_SIZE: 5
-  TIME_DELAY_MS: 2000
+  DAILY_LIMIT: 20
+  DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
 
 jobs:
   follow:
@@ -21,63 +26,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-python@v5
         with:
-          go-version: "1.25"
-          cache: false
+          python-version: "3.12"
 
-      - run: go build -o gh_followers ./cmd
-
-      - name: Follow 1 user per account (30 total/day)
-        run: |
-          TOP_ACCOUNTS=(
-            "torvalds" "gaearon" "sindresorhus" "yyx990803" "tj"
-            "addyosmani" "paulirish" "getify" "kentcdodds" "mxstbr"
-            "nicowillis" "jeresig" "dhh" "defunkt" "mojombo"
-            "pjhyett" "wycats" "ezmobius" "jnewland" "technoweenie"
-            "josevalim" "lifo" "rails" "tenderlove" "brynary"
-            "schacon" "bmizerany" "rtomayko" "adamwiggins" "kneath"
-          )
-
-          # Capture output to parse followed usernames
-          > /tmp/follow-output.txt
-          for account in "${TOP_ACCOUNTS[@]}"; do
-            echo "→ Following 1 user from $account..."
-            ./gh_followers follow "$account" --force --limit 1 | tee -a /tmp/follow-output.txt
-          done
-
-      - name: Update follow log
-        run: |
-          [ ! -f follow-log.json ] && echo "[]" > follow-log.json
-
-          python3 - <<'EOF'
-          import json, re
-          from datetime import datetime, timezone
-
-          today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-          # Parse "Followed <username>" lines from tool output
-          with open("/tmp/follow-output.txt") as f:
-              output = f.read()
-
-          followed = re.findall(r"^Followed (.+)$", output, re.MULTILINE)
-
-          with open("follow-log.json") as f:
-              log = json.load(f)
-
-          if followed:
-              log.append({"date": today, "users": followed})
-              with open("follow-log.json", "w") as f:
-                  json.dump(log, f, indent=2)
-              print(f"Logged {len(followed)} users for {today}: {followed}")
-          else:
-              print("No new users followed today")
-          EOF
+      - name: Follow up to 20 random active developers
+        run: python scripts/grow.py follow
 
       - name: Commit follow log
         run: |
           git config user.name "${{ secrets.GH_USERNAME }}"
           git config user.email "${{ secrets.GH_EMAIL }}"
           git add follow-log.json
-          git diff --cached --quiet || git commit -m "chore: followed new users $(TZ='Africa/Lagos' date '+%Y-%m-%d %H:%M:%S WAT')"
+          git diff --cached --quiet || git commit -m "chore: followed new users $(date -u '+%Y-%m-%d')"
           git push
